@@ -11,7 +11,7 @@ TICKERS = {
     'MTUM': 'MTUM'
 }
 
-DISCORD_WEBHOOK = os.getenv('DISCORD_WEBHOOK_URL2')
+DISCORD_WEBHOOK = os.getenv('DISCORD_WEBHOOK_URL')
 
 # ==================== Helper Functions ====================
 def get_historical_high(df, days):

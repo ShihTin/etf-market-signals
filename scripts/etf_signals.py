@@ -29,16 +29,14 @@ def calculate_drawdown(current, high):
     return (current - high) / high * 100
 
 def get_cnn_fear_greed():
-    """修正後的 CNN 抓取（目前應抓到 40）"""
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     try:
         resp = requests.get("https://www.cnn.com/markets/fear-and-greed", headers=headers, timeout=15)
         resp.raise_for_status()
-        # 加強 regex 抓取
         match = re.search(r'Fear & Greed Index["\s\w]*?(\d{1,3})', resp.text)
         if match:
             return int(match.group(1))
-        match2 = re.search(r'(\d{1,3})\s*(?:</div>|<div[^>]*class="[^"]*index[^"]*"|Fear)', resp.text, re.IGNORECASE)
+        match2 = re.search(r'(\d{1,3})\s*(?:</div>|<div[^>]*class)', resp.text, re.IGNORECASE)
         if match2:
             return int(match2.group(1))
     except Exception as e:
@@ -62,10 +60,9 @@ def get_sentimentrader_smart_dumb():
         return None, None
 
 def get_aaii_bearish():
-    """嘗試 MacroMicro + AAII 官網"""
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        # 先試 MacroMicro
+        # MacroMicro
         resp = requests.get("https://www.macromicro.me/charts/20828/us-aaii-sentimentsurvey", headers=headers, timeout=10)
         text = resp.text
         match = re.search(r'Bearish[^0-9]*?(\d{1,2}\.\d)', text, re.IGNORECASE | re.DOTALL)
@@ -73,9 +70,7 @@ def get_aaii_bearish():
             return float(match.group(1))
     except:
         pass
-    
     try:
-        # 備用 AAII 官網
         resp = requests.get("https://www.aaii.com/sentimentsurvey", headers=headers, timeout=10)
         text = resp.text
         match = re.search(r'Bearish[^0-9]*?(\d{1,2}\.\d)', text, re.IGNORECASE | re.DOTALL)
@@ -86,17 +81,19 @@ def get_aaii_bearish():
     return None
 
 def get_vix_current():
-    """優先 yfinance，其次 Yahoo"""
+    """修正版：確保回傳單一數值"""
     try:
         data = yf.download('^VIX', period="5d", progress=False)
         if not data.empty:
-            return round(data['Close'].iloc[-1], 2)
-    except:
-        pass
+            vix = data['Close'].iloc[-1]
+            return round(float(vix), 2)
+    except Exception as e:
+        print("yfinance VIX 失敗:", e)
+    
     try:
         resp = requests.get("https://finance.yahoo.com/quote/%5EVIX", 
                            headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-        match = re.search(r'([\d.]{3,6})\s*(?:<|VIX)', resp.text)
+        match = re.search(r'([\d]{1,3}\.\d{1,2})', resp.text)
         if match:
             return float(match.group(1))
     except:
@@ -108,12 +105,11 @@ def main():
     signals = []
     daily_info = []
 
-    data = yf.download(list(TICKERS.values()), period="400d", group_by='ticker', auto_adjust=True, progress=False)
+    # 下載 SPY & MTUM
+    data = yf.download(['SPY', 'MTUM'], period="400d", group_by='ticker', auto_adjust=True, progress=False)
 
     latest = {}
-    vix_current = get_vix_current()
-
-    for name, ticker in TICKERS.items():
+    for name, ticker in [('SPY','SPY'), ('MTUM','MTUM')]:
         try:
             if ticker in data:
                 df = data[ticker].dropna()
@@ -124,6 +120,7 @@ def main():
 
     spy = latest.get('SPY')
     mtum = latest.get('MTUM')
+    vix_current = get_vix_current()
 
     # ==================== 每日市場概況 ====================
     if spy:
@@ -135,7 +132,7 @@ def main():
     cnn = get_cnn_fear_greed()
     daily_info.append(f"**CNN Fear & Greed**: {cnn if cnn is not None else '抓取失敗'}")
 
-    daily_info.append(f"**VIX**: {vix_current if vix_current else '抓取失敗'}")
+    daily_info.append(f"**VIX**: {vix_current if vix_current is not None else '抓取失敗'}")
 
     aaii = get_aaii_bearish()
     daily_info.append(f"**AAII Bearish**: {aaii if aaii is not None else '抓取失敗'}%")
@@ -147,11 +144,10 @@ def main():
         daily_info.append("**Smart/Dumb Money**: 抓取失敗")
 
     # ==================== 觸發訊號 ====================
-    if vix_current:
-        if 30 <= vix_current < 40:
-            signals.append(f"🟡 **VIX = {vix_current}**")
-        elif vix_current >= 40:
-            signals.append(f"🔴 **VIX = {vix_current}**")
+    if vix_current and 30 <= vix_current < 40:
+        signals.append(f"🟡 **VIX = {vix_current}**")
+    elif vix_current and vix_current >= 40:
+        signals.append(f"🔴 **VIX = {vix_current}**")
 
     if smart is not None and dumb is not None:
         if smart > dumb and smart > 0.7:

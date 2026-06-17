@@ -29,16 +29,16 @@ def calculate_drawdown(current, high):
     return (current - high) / high * 100
 
 def get_cnn_fear_greed():
+    """修正後的 CNN 抓取（目前應抓到 40）"""
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     try:
         resp = requests.get("https://www.cnn.com/markets/fear-and-greed", headers=headers, timeout=15)
         resp.raise_for_status()
-        # 針對目前網站結構
+        # 加強 regex 抓取
         match = re.search(r'Fear & Greed Index["\s\w]*?(\d{1,3})', resp.text)
         if match:
             return int(match.group(1))
-        # 備用
-        match2 = re.search(r'(\d{1,3})\s*(?:</div>|<div[^>]*>)?\s*Fear', resp.text, re.IGNORECASE)
+        match2 = re.search(r'(\d{1,3})\s*(?:</div>|<div[^>]*class="[^"]*index[^"]*"|Fear)', resp.text, re.IGNORECASE)
         if match2:
             return int(match2.group(1))
     except Exception as e:
@@ -52,10 +52,8 @@ def get_sentimentrader_smart_dumb():
                            timeout=15)
         resp.raise_for_status()
         text = resp.text
-        
         smart_match = re.search(r'SMART MONEY.*?([\d.]+)', text, re.IGNORECASE | re.DOTALL)
         dumb_match = re.search(r'DUMB MONEY.*?([\d.]+)', text, re.IGNORECASE | re.DOTALL)
-        
         smart = float(smart_match.group(1)) if smart_match else None
         dumb = float(dumb_match.group(1)) if dumb_match else None
         return smart, dumb
@@ -64,28 +62,45 @@ def get_sentimentrader_smart_dumb():
         return None, None
 
 def get_aaii_bearish():
+    """嘗試 MacroMicro + AAII 官網"""
+    headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        resp = requests.get("https://www.aaii.com/sentimentsurvey", 
-                           headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-        resp.raise_for_status()
+        # 先試 MacroMicro
+        resp = requests.get("https://www.macromicro.me/charts/20828/us-aaii-sentimentsurvey", headers=headers, timeout=10)
         text = resp.text
-        
-        bearish_match = re.search(r'Bearish[^0-9]*?(\d{1,2}\.\d)', text, re.IGNORECASE | re.DOTALL)
-        if bearish_match:
-            return float(bearish_match.group(1))
-        return None
+        match = re.search(r'Bearish[^0-9]*?(\d{1,2}\.\d)', text, re.IGNORECASE | re.DOTALL)
+        if match:
+            return float(match.group(1))
+    except:
+        pass
+    
+    try:
+        # 備用 AAII 官網
+        resp = requests.get("https://www.aaii.com/sentimentsurvey", headers=headers, timeout=10)
+        text = resp.text
+        match = re.search(r'Bearish[^0-9]*?(\d{1,2}\.\d)', text, re.IGNORECASE | re.DOTALL)
+        if match:
+            return float(match.group(1))
     except Exception as e:
         print("AAII 抓取失敗:", e)
-        return None
+    return None
 
-def download_with_retry(tickers, period="400d"):
-    for attempt in range(3):
-        try:
-            data = yf.download(tickers, period=period, group_by='ticker', auto_adjust=True, progress=False)
-            return data
-        except Exception as e:
-            print(f"yfinance 嘗試 {attempt+1} 失敗:", e)
-            time.sleep(3)
+def get_vix_current():
+    """優先 yfinance，其次 Yahoo"""
+    try:
+        data = yf.download('^VIX', period="5d", progress=False)
+        if not data.empty:
+            return round(data['Close'].iloc[-1], 2)
+    except:
+        pass
+    try:
+        resp = requests.get("https://finance.yahoo.com/quote/%5EVIX", 
+                           headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        match = re.search(r'([\d.]{3,6})\s*(?:<|VIX)', resp.text)
+        if match:
+            return float(match.group(1))
+    except:
+        pass
     return None
 
 # ==================== 主程式 ====================
@@ -93,25 +108,24 @@ def main():
     signals = []
     daily_info = []
 
-    data = download_with_retry(list(TICKERS.values()))
+    data = yf.download(list(TICKERS.values()), period="400d", group_by='ticker', auto_adjust=True, progress=False)
 
     latest = {}
-    vix_current = None
+    vix_current = get_vix_current()
+
     for name, ticker in TICKERS.items():
         try:
-            if data is not None and ticker in data:
+            if ticker in data:
                 df = data[ticker].dropna()
                 if not df.empty:
                     latest[name] = {'close': df['Close'].iloc[-1], 'df': df}
-                    if name == 'VIX':
-                        vix_current = round(df['Close'].iloc[-1], 2)
         except:
             continue
 
     spy = latest.get('SPY')
     mtum = latest.get('MTUM')
 
-    # ==================== 每日必顯示 ====================
+    # ==================== 每日市場概況 ====================
     if spy:
         close = spy['close']
         high_6m = get_historical_high(spy['df'], 180)
@@ -133,12 +147,6 @@ def main():
         daily_info.append("**Smart/Dumb Money**: 抓取失敗")
 
     # ==================== 觸發訊號 ====================
-    # （這裡保留你原本的觸發條件邏輯，省略以節省篇幅）
-
-    if spy:
-        # ... SPY 條件（與之前相同）...
-        pass
-
     if vix_current:
         if 30 <= vix_current < 40:
             signals.append(f"🟡 **VIX = {vix_current}**")

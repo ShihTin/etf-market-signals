@@ -29,25 +29,19 @@ def calculate_drawdown(current, high):
     return (current - high) / high * 100
 
 def get_cnn_fear_greed():
+    """改用網頁抓取 CNN Fear & Greed"""
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     try:
-        url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata/"
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        # 主要抓取方式
+        url = "https://www.cnn.com/markets/fear-and-greed"
         resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
-        data = resp.json()
-        latest = data['fear_and_greed_historical']['data'][-1]
-        return int(latest['score'])
+        match = re.search(r'Fear & Greed Index["\s\w]*?(\d{1,3})', resp.text)
+        if match:
+            return int(match.group(1))
     except Exception as e:
-        print("CNN 抓取失敗:", e)
-        # 備用：直接抓 CNN 網頁
-        try:
-            resp = requests.get("https://www.cnn.com/markets/fear-and-greed", headers=headers, timeout=10)
-            match = re.search(r'Fear & Greed Index["\s\w]*?(\d{1,3})', resp.text)
-            if match:
-                return int(match.group(1))
-        except:
-            pass
-        return None
+        print("CNN 主要抓取失敗:", e)
+    return None
 
 def get_sentimentrader_smart_dumb():
     try:
@@ -56,8 +50,10 @@ def get_sentimentrader_smart_dumb():
         resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
         text = resp.text
-        smart_match = re.search(r'SMART MONEY.*?([\d.]+)', text, re.IGNORECASE)
-        dumb_match = re.search(r'DUMB MONEY.*?([\d.]+)', text, re.IGNORECASE)
+        
+        smart_match = re.search(r'SMART MONEY.*?([\d.]+)', text, re.IGNORECASE | re.DOTALL)
+        dumb_match = re.search(r'DUMB MONEY.*?([\d.]+)', text, re.IGNORECASE | re.DOTALL)
+        
         smart = float(smart_match.group(1)) if smart_match else None
         dumb = float(dumb_match.group(1)) if dumb_match else None
         return smart, dumb
@@ -71,8 +67,9 @@ def get_aaii_bearish():
         headers = {'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(url, headers=headers, timeout=10)
         text = resp.text
-        # 改善 regex
-        bearish_match = re.search(r'Bearish[^0-9]*?(\d{1,2}\.\d)', text, re.IGNORECASE)
+        
+        # 抓取最新的 Bearish 百分比
+        bearish_match = re.search(r'Bearish.*?(\d{1,2}\.\d)', text, re.IGNORECASE | re.DOTALL)
         if bearish_match:
             return float(bearish_match.group(1))
         return None
@@ -83,11 +80,11 @@ def get_aaii_bearish():
 def download_with_retry(tickers, period="400d"):
     for attempt in range(3):
         try:
-            data = yf.download(tickers, period=period, group_by='ticker', auto_adjust=True)
+            data = yf.download(tickers, period=period, group_by='ticker', auto_adjust=True, progress=False)
             return data
         except Exception as e:
             print(f"yfinance 嘗試 {attempt+1} 失敗:", e)
-            time.sleep(2)
+            time.sleep(3)
     return None
 
 # ==================== 主程式 ====================
@@ -95,12 +92,8 @@ def main():
     signals = []
     daily_info = []
 
-    # 下載資料（加重試）
+    # 下載市場資料
     data = download_with_retry(list(TICKERS.values()))
-
-    if data is None:
-        print("無法下載市場資料")
-        # 仍繼續執行其他部分
 
     latest = {}
     vix_current = None
@@ -109,10 +102,7 @@ def main():
             if data is not None and ticker in data:
                 df = data[ticker].dropna()
                 if not df.empty:
-                    latest[name] = {
-                        'close': df['Close'].iloc[-1],
-                        'df': df
-                    }
+                    latest[name] = {'close': df['Close'].iloc[-1], 'df': df}
                     if name == 'VIX':
                         vix_current = round(df['Close'].iloc[-1], 2)
         except:
@@ -131,6 +121,8 @@ def main():
     cnn = get_cnn_fear_greed()
     if cnn is not None:
         daily_info.append(f"**CNN Fear & Greed**: {cnn}")
+    else:
+        daily_info.append("**CNN Fear & Greed**: 抓取失敗")
 
     if vix_current:
         daily_info.append(f"**VIX**: {vix_current}")
@@ -145,14 +137,60 @@ def main():
 
     smart, dumb = get_sentimentrader_smart_dumb()
     if smart is not None and dumb is not None:
-        daily_info.append(f"**Smart/Dumb**: Smart {smart:.2f} | Dumb {dumb:.2f}")
+        daily_info.append(f"**Smart/Dumb Money**: Smart {smart:.2f} | Dumb {dumb:.2f}")
     else:
-        daily_info.append("**Smart/Dumb**: 抓取失敗")
+        daily_info.append("**Smart/Dumb Money**: 抓取失敗")
 
-    # ==================== 觸發訊號（維持原邏輯） ====================
-    # ... (SPY 條件、VIX、MTUM、CNN、Smart Money 條件保持不變，我這裡省略以節省篇幅，你可以保留上次版本的這段)
+    # ==================== 觸發訊號 ====================
+    # SPY 創新高 & 跌幅條件（保留你原本邏輯）
+    if spy:
+        close = spy['close']
+        df_spy = spy['df']
+        high_6m = get_historical_high(df_spy, 180)
+        dd_6m = calculate_drawdown(close, high_6m)
+        high_1y = get_historical_high(df_spy, 365)
+        dd_1y = calculate_drawdown(close, high_1y)
 
-    # ==================== 發送 ====================
+        all_time_high = df_spy['High'].max()
+        if abs(close - all_time_high) / all_time_high < 0.001:
+            signals.append("🟢 **SPY 創新高**")
+
+        if high_6m and dd_6m <= -5:
+            color = "🟡" if dd_6m > -10 else "🟠"
+            signals.append(f"{color} **SPY 距半年高點下跌 {abs(round(dd_6m,1))}%**")
+        if high_6m and dd_6m <= -15:
+            signals.append(f"🔶 **SPY 距半年高點下跌 {abs(round(dd_6m,1))}%**")
+
+        if high_1y and dd_1y <= -20:
+            for thresh, color in [(20,"🔴"), (25,"🟣"), (30,"🟣"), (35,"🟣"), (40,"⚫")]:
+                if dd_1y <= -thresh:
+                    signals.append(f"{color} **SPY 距一年高點下跌 {abs(round(dd_1y,1))}%**")
+
+    if vix_current:
+        if 30 <= vix_current < 40:
+            signals.append(f"🟡 **VIX = {vix_current}**")
+        elif vix_current >= 40:
+            signals.append(f"🔴 **VIX = {vix_current}**")
+
+    if mtum:
+        close_m = mtum['close']
+        df_m = mtum['df']
+        high_2m = get_historical_high(df_m, 60)
+        dd_m = calculate_drawdown(close_m, high_2m)
+        if dd_m <= -5:
+            signals.append(f"🌼 **MTUM 距2個月高點下跌 {abs(round(dd_m,1))}%**")
+
+    if cnn is not None:
+        if 20 < cnn < 30:
+            signals.append(f"🟡 **CNN Fear & Greed = {cnn}**")
+        elif cnn <= 20:
+            signals.append(f"🔴 **CNN Fear & Greed = {cnn}**")
+
+    if smart is not None and dumb is not None:
+        if smart > dumb and smart > 0.7:
+            signals.append(f"🟢 **Smart Money 優勢** (Smart: {smart:.2f} > Dumb: {dumb:.2f})")
+
+    # ==================== 發送 Discord ====================
     if DISCORD_WEBHOOK:
         message = "**🌍 大盤 ETF 每日訊號通知**\n"
         message += f"**時間**: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
@@ -164,13 +202,10 @@ def main():
             message += "**今日無特殊觸發訊號**"
 
         payload = {"content": message, "username": "Market Signal Bot - ETF"}
-        try:
-            requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
-            print("✅ Discord 發送成功")
-        except Exception as e:
-            print("Discord 發送失敗:", e)
+        requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
+        print("✅ Discord 發送成功")
     else:
-        print("❌ DISCORD_WEBHOOK_URL 未設定！")
+        print("❌ Webhook 未設定")
 
 if __name__ == "__main__":
     main()

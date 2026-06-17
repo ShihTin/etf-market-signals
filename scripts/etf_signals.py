@@ -29,18 +29,21 @@ def calculate_drawdown(current, high):
     return (current - high) / high * 100
 
 def get_cnn_fear_greed():
-    """改用網頁抓取 CNN Fear & Greed"""
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     try:
-        # 主要抓取方式
         url = "https://www.cnn.com/markets/fear-and-greed"
         resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
+        # 改進 regex，抓取主要 Fear & Greed 數值
         match = re.search(r'Fear & Greed Index["\s\w]*?(\d{1,3})', resp.text)
         if match:
             return int(match.group(1))
+        # 備用抓取
+        match2 = re.search(r'(\d{1,3})\s*</?div[^>]*>.*?(?:Fear|Greed)', resp.text, re.IGNORECASE)
+        if match2:
+            return int(match2.group(1))
     except Exception as e:
-        print("CNN 主要抓取失敗:", e)
+        print("CNN 抓取失敗:", e)
     return None
 
 def get_sentimentrader_smart_dumb():
@@ -68,8 +71,8 @@ def get_aaii_bearish():
         resp = requests.get(url, headers=headers, timeout=10)
         text = resp.text
         
-        # 抓取最新的 Bearish 百分比
-        bearish_match = re.search(r'Bearish.*?(\d{1,2}\.\d)', text, re.IGNORECASE | re.DOTALL)
+        # 針對最新 Bearish 百分比
+        bearish_match = re.search(r'Bearish[^0-9]*?(\d{1,2}\.\d)', text, re.IGNORECASE | re.DOTALL)
         if bearish_match:
             return float(bearish_match.group(1))
         return None
@@ -92,7 +95,6 @@ def main():
     signals = []
     daily_info = []
 
-    # 下載市場資料
     data = download_with_retry(list(TICKERS.values()))
 
     latest = {}
@@ -142,7 +144,6 @@ def main():
         daily_info.append("**Smart/Dumb Money**: 抓取失敗")
 
     # ==================== 觸發訊號 ====================
-    # SPY 創新高 & 跌幅條件（保留你原本邏輯）
     if spy:
         close = spy['close']
         df_spy = spy['df']
@@ -190,7 +191,7 @@ def main():
         if smart > dumb and smart > 0.7:
             signals.append(f"🟢 **Smart Money 優勢** (Smart: {smart:.2f} > Dumb: {dumb:.2f})")
 
-    # ==================== 發送 Discord ====================
+    # ==================== 發送 ====================
     if DISCORD_WEBHOOK:
         message = "**🌍 大盤 ETF 每日訊號通知**\n"
         message += f"**時間**: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"

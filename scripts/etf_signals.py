@@ -5,13 +5,6 @@ from datetime import datetime, timedelta
 import os
 import time
 
-# ==================== 設定 ====================
-TICKERS = {
-    'SPY': 'SPY',
-    'VIX': '^VIX',
-    'MTUM': 'MTUM'
-}
-
 DISCORD_WEBHOOK = os.getenv('DISCORD_WEBHOOK_URL')
 
 # ==================== Helper Functions ====================
@@ -29,66 +22,23 @@ def calculate_drawdown(current, high):
     return (current - high) / high * 100
 
 def get_cnn_fear_greed():
-    """CNN Fear & Greed - 使用官方 JSON API"""
     try:
         url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata/"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
+        resp = requests.get(url, headers=headers, timeout=10)
         data = resp.json()
         latest = data['fear_and_greed_historical']['data'][-1]
         return int(latest['score'])
-    except Exception as e:
-        print("CNN 抓取失敗:", e)
+    except:
         return None
 
-def get_macromicro_smart_dumb():
-    """Smart vs Dumb Money - MacroMicro"""
+def get_vix_current():
     try:
-        url = "https://www.macromicro.me/charts/128350/us-smart-vs-dumb-money-confidence"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        resp = requests.get(url, headers=headers, timeout=15)
-        text = resp.text
-        
-        smart_match = re.search(r'Smart Money.*?([\d.]{3,})', text, re.IGNORECASE | re.DOTALL)
-        dumb_match = re.search(r'Dumb Money.*?([\d.]{3,})', text, re.IGNORECASE | re.DOTALL)
-        
-        smart = float(smart_match.group(1)) if smart_match else None
-        dumb = float(dumb_match.group(1)) if dumb_match else None
-        return smart, dumb
-    except Exception as e:
-        print("MacroMicro Smart/Dumb 抓取失敗:", e)
-        return None, None
-
-def get_aaii_bearish():
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    try:
-        resp = requests.get("https://www.macromicro.me/charts/20828/us-aaii-sentimentsurvey", 
-                           headers=headers, timeout=10)
-        text = resp.text
-        match = re.search(r'Bearish[^0-9]*?(\d{1,2}\.\d)', text, re.IGNORECASE | re.DOTALL)
-        if match:
-            return float(match.group(1))
+        data = yf.download('^VIX', period="10d", progress=False, timeout=10)
+        if not data.empty:
+            return round(float(data['Close'].iloc[-1]), 2)
     except:
         pass
-    try:
-        resp = requests.get("https://www.aaii.com/sentimentsurvey", headers=headers, timeout=10)
-        text = resp.text
-        match = re.search(r'Bearish[^0-9]*?(\d{1,2}\.\d)', text, re.IGNORECASE | re.DOTALL)
-        if match:
-            return float(match.group(1))
-    except Exception as e:
-        print("AAII 抓取失敗:", e)
-    return None
-
-def get_vix_current():
-    for attempt in range(3):
-        try:
-            data = yf.download('^VIX', period="5d", progress=False)
-            if not data.empty:
-                return round(float(data['Close'].iloc[-1]), 2)
-        except:
-            time.sleep(2)
     return None
 
 # ==================== 主程式 ====================
@@ -96,7 +46,8 @@ def main():
     signals = []
     daily_info = []
 
-    data = yf.download(['SPY', 'MTUM'], period="400d", group_by='ticker', auto_adjust=True, progress=False)
+    # 只下載 SPY + MTUM，縮短時間
+    data = yf.download(['SPY', 'MTUM'], period="300d", group_by='ticker', auto_adjust=True, progress=False)
 
     latest = {}
     for t in ['SPY', 'MTUM']:
@@ -124,17 +75,12 @@ def main():
 
     daily_info.append(f"**VIX**: {vix_current if vix_current is not None else '抓取失敗'}")
 
-    aaii = get_aaii_bearish()
-    daily_info.append(f"**AAII Bearish**: {aaii if aaii is not None else '抓取失敗'}%")
-
-    smart, dumb = get_macromicro_smart_dumb()
-    if smart is not None and dumb is not None:
-        daily_info.append(f"**Smart/Dumb Money**: Smart {smart:.2f} | Dumb {dumb:.2f}")
-    else:
-        daily_info.append("**Smart/Dumb Money**: 抓取失敗")
+    daily_info.append("**AAII Bearish**: 暫停抓取")          # 先暫停
+    daily_info.append("**Smart/Dumb Money**: 暫停抓取")     # 先暫停
 
     # ==================== 觸發訊號 ====================
     if spy:
+        # SPY 條件（保持你的原始邏輯）
         close = spy['close']
         df_spy = spy['df']
         high_6m = get_historical_high(df_spy, 180)
@@ -163,24 +109,6 @@ def main():
         elif vix_current >= 40:
             signals.append(f"🔴 **VIX = {vix_current}**")
 
-    if mtum:
-        close_m = mtum['close']
-        df_m = mtum['df']
-        high_2m = get_historical_high(df_m, 60)
-        dd_m = calculate_drawdown(close_m, high_2m)
-        if dd_m <= -5:
-            signals.append(f"🌼 **MTUM 距2個月高點下跌 {abs(round(dd_m,1))}%**")
-
-    if cnn is not None:
-        if 20 < cnn < 30:
-            signals.append(f"🟡 **CNN Fear & Greed = {cnn}**")
-        elif cnn <= 20:
-            signals.append(f"🔴 **CNN Fear & Greed = {cnn}**")
-
-    if smart is not None and dumb is not None:
-        if smart > dumb and smart > 0.7:
-            signals.append(f"🟢 **Smart Money 優勢** (Smart: {smart:.2f} > Dumb: {dumb:.2f})")
-
     # ==================== 發送 ====================
     if DISCORD_WEBHOOK:
         message = "**🌍 大盤 ETF 每日訊號通知**\n"
@@ -192,8 +120,7 @@ def main():
         else:
             message += "**今日無特殊觸發訊號**"
 
-        payload = {"content": message, "username": "Market Signal Bot - ETF"}
-        requests.post(DISCORD_WEBHOOK, json=payload, timeout=10)
+        requests.post(DISCORD_WEBHOOK, json={"content": message, "username": "Market Signal Bot - ETF"}, timeout=10)
         print("✅ Discord 發送成功")
 
 if __name__ == "__main__":

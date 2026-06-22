@@ -1,143 +1,92 @@
 import yfinance as yf
-import requests
-from datetime import datetime
-import os
+import pandas as pd
 
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-
+def get_last_price(ticker):
+    df = yf.download(ticker, period="1y", interval="1d", progress=False)
+    return df["Close"].iloc[-1], df
 
 # -------------------------
-# SPY 風險階梯（6級）
+# SPY signal
 # -------------------------
 def get_spy_signal():
-    spy = yf.download("SPY", period="6mo", auto_adjust=True, progress=False)
+    price, df = get_last_price("SPY")
 
-    close = float(spy["Close"].iloc[-1])
-    high_6m = float(spy["Close"].max())
+    high_52w = df["Close"].rolling(252).max().iloc[-1]
 
-    drawdown = (close - high_6m) / high_6m * 100
+    drop = (price - high_52w) / high_52w
 
-    if abs(drawdown) < 0.5:
-        return "🟢 SPY 創半年新高"
-
-    elif drawdown <= -30:
-        return f"🟣 SPY 距半年高點 {drawdown:.1f}%"
-
-    elif drawdown <= -20:
-        return f"🟥🟣 SPY 距半年高點 {drawdown:.1f}%"
-
-    elif drawdown <= -15:
-        return f"🔴 SPY 距半年高點 {drawdown:.1f}%"
-
-    elif drawdown <= -10:
-        return f"🟠 SPY 距半年高點 {drawdown:.1f}%"
-
-    elif drawdown <= -5:
-        return f"🟡 SPY 距半年高點 {drawdown:.1f}%"
-
-    return None
-
+    if drop >= -0.05:
+        return "🟢 SPY 創新高附近"
+    elif drop >= -0.10:
+        return "🟡 SPY 距高點 -5%"
+    elif drop >= -0.15:
+        return "🟠 SPY 距高點 -10%"
+    elif drop >= -0.20:
+        return "🔴 SPY 距高點 -20%"
+    else:
+        return "🟣 SPY 距高點 -30%以下"
 
 # -------------------------
-# VIX 風險燈號
-# -------------------------
-def get_vix_signal():
-    vix = yf.download("^VIX", period="5d", auto_adjust=True, progress=False)
-
-    value = float(vix["Close"].iloc[-1])
-
-    if value > 40:
-        return f"🔴 VIX {value:.1f}"
-    elif value > 30:
-        return f"🟠 VIX {value:.1f}"
-    elif value > 25:
-        return f"🟡 VIX {value:.1f}"
-    elif value < 20:
-        return f"🟢 VIX {value:.1f}"
-
-    return None
-
-
-# -------------------------
-# MTUM 動能 + 回撤監控
+# MTUM signal
 # -------------------------
 def get_mtum_signal():
-    spy = yf.download("SPY", period="6mo", auto_adjust=True, progress=False)
-    mtum = yf.download("MTUM", period="6mo", auto_adjust=True, progress=False)
+    price, df = get_last_price("MTUM")
 
-    spy_return = (spy["Close"].iloc[-1] / spy["Close"].iloc[0] - 1) * 100
-    mtum_return = (mtum["Close"].iloc[-1] / mtum["Close"].iloc[0] - 1) * 100
+    high_52w = df["Close"].rolling(252).max().iloc[-1]
 
-    mtum_drawdown = (mtum["Close"].iloc[-1] / mtum["Close"].max() - 1) * 100
+    drop = (price - high_52w) / high_52w
 
-    signals = []
-
-    # 相對強弱
-    if mtum_return > spy_return:
-        signals.append(
-            f"🟢 MTUM 領先 SPY ({mtum_return:.1f}% vs {spy_return:.1f}%)"
-        )
+    if drop <= -0.10:
+        return "🔴 MTUM 跌10%"
+    elif drop <= -0.05:
+        return "🟠 MTUM 跌5%"
     else:
-        signals.append(
-            f"⚪ MTUM 落後 SPY ({mtum_return:.1f}% vs {spy_return:.1f}%)"
-        )
-
-    # MTUM 動能回撤
-    if mtum_drawdown <= -10:
-        signals.append(f"🔴 MTUM 距高點 {mtum_drawdown:.1f}%")
-    elif mtum_drawdown <= -5:
-        signals.append(f"🟡 MTUM 距高點 {mtum_drawdown:.1f}%")
-
-    return signals
-
+        return "🟢 MTUM 正常"
 
 # -------------------------
-# Discord 發送
+# VIX signal
 # -------------------------
-def send_discord(message):
-    requests.post(
-        DISCORD_WEBHOOK_URL,
-        json={"content": message}
-    )
+def get_vix_signal():
+    price, _ = get_last_price("^VIX")
 
+    if price > 20:
+        return "⚠️ VIX 偏高"
+    elif price > 15:
+        return "🟡 VIX 中性偏高"
+    else:
+        return "🟢 VIX 正常"
 
 # -------------------------
-# 主程式
+# main
 # -------------------------
 def main():
-    signals = []
+    messages = []
 
-    # SPY + VIX
-    for fn in [get_spy_signal, get_vix_signal]:
-        try:
-            r = fn()
-            if r:
-                signals.append(r)
-        except Exception as e:
-            signals.append(f"⚠️ {fn.__name__} error: {e}")
-
-    # MTUM（list）
     try:
-        mtum_signals = get_mtum_signal()
-        if mtum_signals:
-            signals.extend(mtum_signals)
+        messages.append(get_spy_signal())
     except Exception as e:
-        signals.append(f"⚠️ MTUM error: {e}")
+        messages.append(f"⚠️ SPY error: {e}")
 
-    # fallback
-    if not signals:
-        signals.append("✅ 今日無訊號")
+    try:
+        messages.append(get_mtum_signal())
+    except Exception as e:
+        messages.append(f"⚠️ MTUM error: {e}")
 
-    message = (
-        "📈 大盤 ETF 每日訊號通知\n"
-        f"時間: {datetime.now():%Y-%m-%d %H:%M}\n\n"
-        + "\n".join(signals)
-    )
+    try:
+        messages.append(get_vix_signal())
+    except Exception as e:
+        messages.append(f"⚠️ VIX error: {e}")
 
-    send_discord(message)
+    msg = "大盤 ETF 每日訊號通知\n\n" + "\n".join(messages)
 
-    print("✅ Discord 發送成功")
+    print(msg)
 
+    # Discord webhook
+    import os, requests
+    webhook = os.environ.get("DISCORD_WEBHOOK_URL")
+
+    if webhook:
+        requests.post(webhook, json={"content": msg})
 
 if __name__ == "__main__":
     main()

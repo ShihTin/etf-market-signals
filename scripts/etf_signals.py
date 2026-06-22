@@ -1,9 +1,6 @@
 import yfinance as yf
 import requests
-import re
 from datetime import datetime, timedelta
-import os
-import time
 
 DISCORD_WEBHOOK = os.getenv('DISCORD_WEBHOOK_URL')
 
@@ -22,29 +19,32 @@ def calculate_drawdown(current, high):
     return (current - high) / high * 100
 
 def get_cnn_fear_greed():
-    """CNN Fear & Greed - 官方 API"""
+    """修正後的 CNN API 抓取"""
     try:
         url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata/"
         headers = {'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(url, headers=headers, timeout=12)
+        resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        latest = data['fear_and_greed_historical']['data'][-1]
-        return int(latest['score'])
+        
+        # 兩種可能結構都支援
+        if 'fear_and_greed' in data and 'score' in data['fear_and_greed']:
+            return int(data['fear_and_greed']['score'])
+        elif 'fear_and_greed_historical' in data and data['fear_and_greed_historical']['data']:
+            return int(data['fear_and_greed_historical']['data'][-1]['y'])
+        return None
     except Exception as e:
         print("CNN 抓取失敗:", e)
         return None
 
 def get_vix_current():
     """VIX 加強版"""
-    for attempt in range(3):
-        try:
-            data = yf.download('^VIX', period="10d", progress=False, timeout=10)
-            if not data.empty:
-                return round(float(data['Close'].iloc[-1]), 2)
-        except Exception as e:
-            print(f"VIX 嘗試 {attempt+1} 失敗:", e)
-            time.sleep(2)
+    try:
+        data = yf.download('^VIX', period="10d", progress=False)
+        if not data.empty:
+            return round(float(data['Close'].iloc[-1]), 2)
+    except Exception as e:
+        print("VIX yfinance 失敗:", e)
     return None
 
 # ==================== 主程式 ====================
@@ -52,16 +52,12 @@ def main():
     signals = []
     daily_info = []
 
-    # 下載資料（只抓 SPY + MTUM + VIX 分開處理）
-    try:
-        data = yf.download(['SPY', 'MTUM'], period="300d", group_by='ticker', auto_adjust=True, progress=False)
-    except:
-        data = None
+    data = yf.download(['SPY', 'MTUM'], period="300d", group_by='ticker', auto_adjust=True, progress=False)
 
     latest = {}
     for t in ['SPY', 'MTUM']:
         try:
-            if data is not None and t in data:
+            if t in data:
                 df = data[t].dropna()
                 if not df.empty:
                     latest[t] = {'close': df['Close'].iloc[-1], 'df': df}
@@ -71,6 +67,7 @@ def main():
     spy = latest.get('SPY')
     mtum = latest.get('MTUM')
     vix_current = get_vix_current()
+    cnn = get_cnn_fear_greed()
 
     # ==================== 每日市場概況 ====================
     if spy:
@@ -78,14 +75,9 @@ def main():
         high_6m = get_historical_high(spy['df'], 180)
         dd_6m = calculate_drawdown(close, high_6m)
         daily_info.append(f"**SPY 收盤**: {round(close, 2)} (距半年高點 {round(dd_6m, 1)}%)")
-    else:
-        daily_info.append("**SPY 收盤**: 抓取失敗")
 
-    cnn = get_cnn_fear_greed()
     daily_info.append(f"**CNN Fear & Greed**: {cnn if cnn is not None else '抓取失敗'}")
-
     daily_info.append(f"**VIX**: {vix_current if vix_current is not None else '抓取失敗'}")
-
     daily_info.append("**AAII Bearish**: 暫停")
     daily_info.append("**Smart/Dumb Money**: 暫停")
 

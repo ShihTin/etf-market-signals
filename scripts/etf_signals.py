@@ -1,6 +1,7 @@
 import yfinance as yf
 import requests
 from datetime import datetime, timedelta
+import os
 
 DISCORD_WEBHOOK = os.getenv('DISCORD_WEBHOOK_URL')
 
@@ -19,32 +20,27 @@ def calculate_drawdown(current, high):
     return (current - high) / high * 100
 
 def get_cnn_fear_greed():
-    """修正後的 CNN API 抓取"""
+    """CNN Fear & Greed"""
     try:
         url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata/"
         headers = {'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        
-        # 兩種可能結構都支援
-        if 'fear_and_greed' in data and 'score' in data['fear_and_greed']:
-            return int(data['fear_and_greed']['score'])
-        elif 'fear_and_greed_historical' in data and data['fear_and_greed_historical']['data']:
-            return int(data['fear_and_greed_historical']['data'][-1]['y'])
-        return None
+        latest = data['fear_and_greed_historical']['data'][-1]
+        return int(latest['score'])
     except Exception as e:
         print("CNN 抓取失敗:", e)
         return None
 
 def get_vix_current():
-    """VIX 加強版"""
+    """VIX"""
     try:
         data = yf.download('^VIX', period="10d", progress=False)
         if not data.empty:
             return round(float(data['Close'].iloc[-1]), 2)
     except Exception as e:
-        print("VIX yfinance 失敗:", e)
+        print("VIX 抓取失敗:", e)
     return None
 
 # ==================== 主程式 ====================
@@ -75,6 +71,8 @@ def main():
         high_6m = get_historical_high(spy['df'], 180)
         dd_6m = calculate_drawdown(close, high_6m)
         daily_info.append(f"**SPY 收盤**: {round(close, 2)} (距半年高點 {round(dd_6m, 1)}%)")
+    else:
+        daily_info.append("**SPY 收盤**: 抓取失敗")
 
     daily_info.append(f"**CNN Fear & Greed**: {cnn if cnn is not None else '抓取失敗'}")
     daily_info.append(f"**VIX**: {vix_current if vix_current is not None else '抓取失敗'}")

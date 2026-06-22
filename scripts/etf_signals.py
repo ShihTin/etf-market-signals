@@ -8,10 +8,16 @@ from datetime import datetime, timezone
 
 
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+DEBUG_FETCH = os.getenv("DEBUG_FETCH", "1") == "1"
 
 SPY = "SPY"
 MTUM = "MTUM"
 VIX = "^VIX"
+
+
+def debug(message):
+    if DEBUG_FETCH:
+        print(message)
 
 
 def safe_float(value):
@@ -66,14 +72,12 @@ def download_data(ticker: str, period: str = "1y") -> pd.DataFrame:
 def latest_close(df: pd.DataFrame):
     if df.empty:
         return None
-
     return safe_float(df.iloc[-1]["Close"])
 
 
 def latest_ma(df: pd.DataFrame, column: str):
     if df.empty or column not in df.columns:
         return None
-
     return safe_float(df.iloc[-1][column])
 
 
@@ -106,7 +110,6 @@ def spy_signal(drawdown_pct):
 
     if drawdown_pct >= -0.1:
         return "新高 綠色標籤"
-
     if drawdown_pct <= -40:
         return "-40% 黑色標籤"
     if drawdown_pct <= -35:
@@ -186,12 +189,11 @@ def fear_greed_label(score):
 
 def find_fear_greed_score(data):
     if isinstance(data, dict):
-        if "fear_and_greed" in data:
-            node = data["fear_and_greed"]
-            if isinstance(node, dict) and "score" in node:
-                return node.get("score"), node.get("rating")
+        node = data.get("fear_and_greed")
+        if isinstance(node, dict) and node.get("score") is not None:
+            return node.get("score"), node.get("rating")
 
-        if "score" in data and ("rating" in data or "classification" in data):
+        if data.get("score") is not None:
             return data.get("score"), data.get("rating") or data.get("classification")
 
         for value in data.values():
@@ -208,7 +210,39 @@ def find_fear_greed_score(data):
     return None, None
 
 
-def get_fear_greed():
+def market_fear_proxy(spy_drawdown, vix_value):
+    if spy_drawdown is None or vix_value is None:
+        return "N/A"
+
+    score = 100
+
+    if spy_drawdown <= -40:
+        score -= 55
+    elif spy_drawdown <= -30:
+        score -= 45
+    elif spy_drawdown <= -20:
+        score -= 35
+    elif spy_drawdown <= -15:
+        score -= 25
+    elif spy_drawdown <= -10:
+        score -= 18
+    elif spy_drawdown <= -5:
+        score -= 10
+
+    if vix_value >= 40:
+        score -= 40
+    elif vix_value >= 30:
+        score -= 28
+    elif vix_value >= 25:
+        score -= 18
+    elif vix_value >= 20:
+        score -= 8
+
+    score = max(0, min(100, score))
+    return f"{score:.0f} ({fear_greed_label(score)}, Market Proxy)"
+
+
+def get_fear_greed(spy_drawdown, vix_value):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     urls = [
@@ -217,40 +251,52 @@ def get_fear_greed():
     ]
 
     headers = {
-        "User-Agent": "Mozilla/5.0",
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
         "Accept": "application/json,text/plain,*/*",
+        "Referer": "https://www.cnn.com/markets/fear-and-greed",
     }
 
     for url in urls:
         try:
             response = requests.get(url, headers=headers, timeout=10)
-            response.raise_for_status()
+            debug(f"[Fear & Greed] {url} status={response.status_code}")
 
+            response.raise_for_status()
             data = response.json()
+
             score, rating = find_fear_greed_score(data)
 
             if score is None:
+                debug("[Fear & Greed] score not found in JSON")
                 continue
 
             score = float(score)
             label = rating if rating else fear_greed_label(score)
-
             return f"{score:.0f} ({label})"
 
-        except Exception:
-            continue
+        except Exception as e:
+            debug(f"[Fear & Greed] fetch failed: {e}")
 
-    return "N/A"
+    return market_fear_proxy(spy_drawdown, vix_value)
 
 
 def get_aaii_bearish():
+    manual_value = os.getenv("AAII_BEARISH")
+    if manual_value:
+        return manual_value
+
     try:
         url = "https://www.aaii.com/sentimentsurvey"
         headers = {
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.aaii.com/",
         }
 
         response = requests.get(url, headers=headers, timeout=10)
+        debug(f"[AAII] {url} status={response.status_code} length={len(response.text)}")
+
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, "html.parser")
@@ -269,7 +315,7 @@ def get_aaii_bearish():
 
             percentages = []
 
-            for next_line in lines[i + 1 : i + 12]:
+            for next_line in lines[i + 1 : i + 20]:
                 if percent_pattern.match(next_line):
                     percentages.append(next_line)
 
@@ -281,9 +327,11 @@ def get_aaii_bearish():
                 bearish = percentages[2]
                 return f"{bearish} ({week_ending})"
 
+        debug("[AAII] bearish data not found in page text")
         return "N/A"
 
-    except Exception:
+    except Exception as e:
+        debug(f"[AAII] fetch failed: {e}")
         return "N/A"
 
 
@@ -313,7 +361,7 @@ def main():
     spy_ma200 = latest_ma(spy_df, "ma200")
     vix_close = latest_close(vix_df)
 
-    fear_greed = get_fear_greed()
+    fear_greed = get_fear_greed(spy_drawdown, vix_close)
     aaii_bearish = get_aaii_bearish()
 
     spy_close_text = "N/A" if spy_close is None else f"{spy_close:.2f}"

@@ -1,7 +1,9 @@
 import os
+import re
 import requests
 import yfinance as yf
 import pandas as pd
+from bs4 import BeautifulSoup
 
 
 WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
@@ -50,13 +52,28 @@ def download_data(ticker: str, period: str = "1y") -> pd.DataFrame:
         return pd.DataFrame()
 
     df = df.dropna(subset=["Close"])
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df["ma50"] = df["Close"].rolling(50).mean()
+    df["ma200"] = df["Close"].rolling(200).mean()
+
     return df
 
 
 def latest_close(df: pd.DataFrame):
     if df.empty:
         return None
+
     return safe_float(df.iloc[-1]["Close"])
+
+
+def latest_ma(df: pd.DataFrame, column: str):
+    if df.empty or column not in df.columns:
+        return None
+
+    return safe_float(df.iloc[-1][column])
 
 
 def drawdown_from_high(df: pd.DataFrame, window: int = 126):
@@ -74,43 +91,53 @@ def drawdown_from_high(df: pd.DataFrame, window: int = 126):
     return close, drawdown_pct
 
 
+def spy_ma_status(close, ma50, ma200):
+    if close is None or ma50 is None or ma200 is None:
+        return "N/A"
+
+    ma50_status = "高於50MA" if close >= ma50 else "低於50MA"
+    ma200_status = "高於200MA" if close >= ma200 else "低於200MA"
+
+    return f"{ma50_status} / {ma200_status}"
+
+
 def spy_signal(drawdown_pct):
     if drawdown_pct is None:
-        return "⚪ N/A"
+        return "N/A"
 
     if drawdown_pct >= -0.1:
-        return "🟢 新高"
+        return "新高"
 
     if drawdown_pct <= -40:
-        return "⚫ -40%"
+        return "-40% 黑色標籤"
     if drawdown_pct <= -35:
-        return "🟣 -35%"
+        return "-35% 紫紅色標籤"
     if drawdown_pct <= -30:
-        return "🟪 -30%"
+        return "-30% 紫色標籤"
     if drawdown_pct <= -20:
-        return "🔴 -20%"
+        return "-20% 紅色標籤"
     if drawdown_pct <= -15:
-        return "🟥 -15%"
+        return "-15% 橘紅色標籤"
     if drawdown_pct <= -10:
-        return "🟠 -10%"
+        return "-10% 橘色標籤"
     if drawdown_pct <= -5:
-        return "🟡 -5%"
+        return "-5% 黃色標籤"
 
-    return "⚪ 正常"
+    return "正常"
 
 
 def vix_signal(vix_value):
     if vix_value is None:
-        return "⚪ N/A"
+        return "N/A"
 
     if vix_value >= 40:
-        return "⚫ VIX >= 40"
+        return ">=40 黑色標籤"
     if vix_value >= 30:
-        return "🔴 VIX >= 30"
+        return ">=30且<40 紅色標籤"
     if vix_value >= 25:
-        return "🟡 VIX >= 25"
+        return ">=25且<30 黃色標籤"
 
-    return "⚪ 正常"
+    return "正常"
 
 
 def pct_return(df: pd.DataFrame, days: int = 63):
@@ -131,25 +158,67 @@ def mtum_signal(mtum_df: pd.DataFrame, spy_df: pd.DataFrame):
     spy_ret = pct_return(spy_df, 63)
 
     if mtum_ret is None or spy_ret is None:
-        return "⚪ N/A"
+        return "N/A"
 
     relative = mtum_ret - spy_ret
 
-    if relative <= -10:
-        decay = "🔴 動能衰退 -10%"
-    elif relative <= -5:
-        decay = "🟡 動能衰退 -5%"
-    else:
-        decay = "⚪ 無明顯衰退"
-
     direction = "領先 SPY" if relative >= 0 else "落後 SPY"
+
+    if relative <= -10:
+        decay = "-10% 動能衰退"
+    elif relative <= -5:
+        decay = "-5% 動能衰退"
+    else:
+        decay = "無明顯衰退"
 
     return f"{direction} ({relative:+.2f}%) / {decay}"
 
 
-def get_cnn_fear_greed():
+def get_fear_greed():
     try:
         url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "application/json",
+        }
+
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+
+        data = response.json()
+
+        fear_greed = data.get("fear_and_greed", {})
+        score = fear_greed.get("score")
+        rating = fear_greed.get("rating")
+
+        if score is None:
+            return "N/A"
+
+        score = float(score)
+
+        if rating:
+            return f"{score:.0f} ({rating})"
+
+        if score <= 25:
+            label = "Extreme Fear"
+        elif score < 50:
+            label = "Fear"
+        elif score == 50:
+            label = "Neutral"
+        elif score < 75:
+            label = "Greed"
+        else:
+            label = "Extreme Greed"
+
+        return f"{score:.0f} ({label})"
+
+    except Exception:
+        return "N/A"
+
+
+def get_aaii_bearish():
+    try:
+        url = "https://www.aaii.com/sentimentsurvey"
         headers = {
             "User-Agent": "Mozilla/5.0",
         }
@@ -157,37 +226,29 @@ def get_cnn_fear_greed():
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
 
-        data = response.json()
-        value = data.get("fear_and_greed", {}).get("score")
+        soup = BeautifulSoup(response.text, "html.parser")
+        text = soup.get_text("\n")
 
-        if value is None:
+        pattern = re.compile(
+            r"(\d{1,2}/\d{1,2}/\d{4})\s+"
+            r"(\d+\.\d+)%\s+"
+            r"(\d+\.\d+)%\s+"
+            r"(\d+\.\d+)%",
+            re.MULTILINE,
+        )
+
+        match = pattern.search(text)
+
+        if not match:
             return "N/A"
 
-        return f"{float(value):.0f}"
+        week_ending = match.group(1)
+        bearish = float(match.group(4))
+
+        return f"{bearish:.1f}% ({week_ending})"
 
     except Exception:
         return "N/A"
-
-
-def get_aaii_bearish():
-    value = os.getenv("AAII_BEARISH")
-
-    if not value:
-        return "N/A"
-
-    try:
-        return f"{float(value):.1f}%"
-    except ValueError:
-        return "N/A"
-
-
-def get_smart_dumb_money():
-    value = os.getenv("SMART_DUMB_MONEY")
-
-    if not value:
-        return "N/A"
-
-    return value
 
 
 def send_webhook(message: str):
@@ -212,24 +273,29 @@ def main():
     vix_df = download_data(VIX, "1y")
 
     spy_close, spy_drawdown = drawdown_from_high(spy_df, 126)
+    spy_ma50 = latest_ma(spy_df, "ma50")
+    spy_ma200 = latest_ma(spy_df, "ma200")
     vix_close = latest_close(vix_df)
 
-    cnn_fear_greed = get_cnn_fear_greed()
+    fear_greed = get_fear_greed()
     aaii_bearish = get_aaii_bearish()
-    smart_dumb_money = get_smart_dumb_money()
 
     spy_close_text = "N/A" if spy_close is None else f"{spy_close:.2f}"
     spy_drawdown_text = "N/A" if spy_drawdown is None else f"{spy_drawdown:+.1f}%"
+    spy_ma50_text = "N/A" if spy_ma50 is None else f"{spy_ma50:.2f}"
+    spy_ma200_text = "N/A" if spy_ma200 is None else f"{spy_ma200:.2f}"
     vix_text = "N/A" if vix_close is None else f"{vix_close:.2f}"
 
     message = f"""大盤 ETF 每日訊號通知
 
 每日顯示數據：
 SPY 收盤: {spy_close_text} (距半年高點 {spy_drawdown_text})
-CNN Fear & Greed: {cnn_fear_greed}
+SPY 50MA: {spy_ma50_text}
+SPY 200MA: {spy_ma200_text}
+SPY 均線位置: {spy_ma_status(spy_close, spy_ma50, spy_ma200)}
+Fear & Greed: {fear_greed}
 VIX: {vix_text}
 AAII Bearish: {aaii_bearish}
-Smart/Dumb Money: {smart_dumb_money}
 
 條件觸發訊號：
 SPY: {spy_signal(spy_drawdown)}

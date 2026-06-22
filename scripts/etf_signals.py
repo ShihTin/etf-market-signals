@@ -1,92 +1,97 @@
+import os
+import requests
 import yfinance as yf
 import pandas as pd
 
-def get_last_price(ticker):
+
+TICKERS = ["SPY", "MTUM", "VIX"]
+WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+
+
+def get_data(ticker: str) -> pd.DataFrame:
+    """
+    抓 ETF 歷史資料
+    """
     df = yf.download(ticker, period="1y", interval="1d", progress=False)
-    return df["Close"].iloc[-1], df
 
-# -------------------------
-# SPY signal
-# -------------------------
-def get_spy_signal():
-    price, df = get_last_price("SPY")
+    if df is None or df.empty:
+        raise ValueError(f"{ticker} no data returned")
 
-    high_52w = df["Close"].rolling(252).max().iloc[-1]
+    df = df.dropna()
 
-    drop = (price - high_52w) / high_52w
+    # 計算均線
+    df["ma50"] = df["Close"].rolling(50).mean()
+    df["ma200"] = df["Close"].rolling(200).mean()
 
-    if drop >= -0.05:
-        return "🟢 SPY 創新高附近"
-    elif drop >= -0.10:
-        return "🟡 SPY 距高點 -5%"
-    elif drop >= -0.15:
-        return "🟠 SPY 距高點 -10%"
-    elif drop >= -0.20:
-        return "🔴 SPY 距高點 -20%"
-    else:
-        return "🟣 SPY 距高點 -30%以下"
+    return df
 
-# -------------------------
-# MTUM signal
-# -------------------------
-def get_mtum_signal():
-    price, df = get_last_price("MTUM")
 
-    high_52w = df["Close"].rolling(252).max().iloc[-1]
+def compute_signal(df: pd.DataFrame) -> str:
+    """
+    單一 ETF 訊號（只看最後一筆，避免 Series bug）
+    """
+    last = df.iloc[-1]
 
-    drop = (price - high_52w) / high_52w
+    close = float(last["Close"])
+    ma50 = float(last["ma50"]) if not pd.isna(last["ma50"]) else None
+    ma200 = float(last["ma200"]) if not pd.isna(last["ma200"]) else None
 
-    if drop <= -0.10:
-        return "🔴 MTUM 跌10%"
-    elif drop <= -0.05:
-        return "🟠 MTUM 跌5%"
-    else:
-        return "🟢 MTUM 正常"
+    if ma50 is None:
+        return "⚪ DATA WAIT"
 
-# -------------------------
-# VIX signal
-# -------------------------
-def get_vix_signal():
-    price, _ = get_last_price("^VIX")
+    # === 基本趨勢判斷 ===
+    if close > ma50 and ma50 > ma200:
+        return "🟢 STRONG BULL"
 
-    if price > 20:
-        return "⚠️ VIX 偏高"
-    elif price > 15:
-        return "🟡 VIX 中性偏高"
-    else:
-        return "🟢 VIX 正常"
+    if close > ma50:
+        return "🟡 BULL"
 
-# -------------------------
-# main
-# -------------------------
+    if close < ma50 and close > ma200:
+        return "🟠 WEAK"
+
+    if close < ma200:
+        return "🔴 BEAR"
+
+    return "⚪ NEUTRAL"
+
+
+def send_webhook(message: str):
+    """
+    發 Discord webhook
+    """
+    if not WEBHOOK_URL:
+        print("No webhook url set")
+        return
+
+    payload = {
+        "content": message
+    }
+
+    try:
+        requests.post(WEBHOOK_URL, json=payload, timeout=10)
+    except Exception as e:
+        print("Webhook error:", e)
+
+
 def main():
-    messages = []
+    print("大盤 ETF 每日訊號通知\n")
 
-    try:
-        messages.append(get_spy_signal())
-    except Exception as e:
-        messages.append(f"⚠️ SPY error: {e}")
+    results = []
 
-    try:
-        messages.append(get_mtum_signal())
-    except Exception as e:
-        messages.append(f"⚠️ MTUM error: {e}")
+    for ticker in TICKERS:
+        try:
+            df = get_data(ticker)
+            signal = compute_signal(df)
+            results.append(f"{ticker}: {signal}")
 
-    try:
-        messages.append(get_vix_signal())
-    except Exception as e:
-        messages.append(f"⚠️ VIX error: {e}")
+        except Exception as e:
+            results.append(f"⚠️ {ticker} error: {str(e)}")
 
-    msg = "大盤 ETF 每日訊號通知\n\n" + "\n".join(messages)
+    message = "\n".join(results)
 
-    print(msg)
+    print(message)
+    send_webhook(message)
 
-    # Discord webhook
-    import os, requests
-    webhook = os.environ.get("DISCORD_WEBHOOK_URL")
-
-    if webhook:
-        requests.post(webhook, json={"content": msg})
 
 if __name__ == "__main__":
     main()

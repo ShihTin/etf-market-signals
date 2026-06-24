@@ -2,7 +2,7 @@ name: Daily ETF Market Signals
 
 on:
   schedule:
-    - cron: '0 11 * * *'   # UTC 11:00 = 台灣晚上 19:00
+    - cron: '30 11 * * *'   # UTC 11:00 = 台灣晚上 19:00
   workflow_dispatch:       # 允許手動測試
 
 jobs:
